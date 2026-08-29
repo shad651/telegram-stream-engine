@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
+const { CustomFile } = require('telegram/client/uploads');
 
 const {
   TELEGRAM_API_ID,
@@ -36,11 +37,9 @@ async function getTelegramClient() {
   return client;
 }
 
-app.get('/', (req, res) => {
-  res.send('Server is active 🚀');
-});
+app.get('/', (req, res) => res.send('Server is active 🚀'));
 
-// ---------- Direct Fast Stream Endpoint ----------
+// ---------- Chunked Stream Endpoint ----------
 app.get('/stream', async (req, res) => {
   try {
     const msgId = parseInt(req.query.msg_id, 10);
@@ -61,6 +60,9 @@ app.get('/stream', async (req, res) => {
     let start = 0;
     let end = fileSize ? fileSize - 1 : 0;
 
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
+
     if (range && fileSize) {
       const parts = range.replace(/bytes=/, "").split("-");
       start = parseInt(parts[0], 10);
@@ -73,30 +75,31 @@ app.get('/stream', async (req, res) => {
       res.setHeader('Content-Length', fileSize);
     }
 
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Accept-Ranges', 'bytes');
-
-    // Fast Chunk Streamer
-    const chunkSize = 512 * 1024; // 512KB chunks
-    const buffer = await tgClient.downloadMedia(message.media, {
-      offset: start,
-      limit: end - start + 1,
-      workers: 1,
+    // Download in stream chunks (64KB chunks)
+    const clientStream = tgClient.iterDownload({
+      file: message.media,
+      offset: BigInt(start),
+      requestSize: 512 * 1024,
     });
 
-    if (buffer) {
-      res.end(buffer);
-    } else {
-      res.status(500).send('Failed to stream media');
+    let currentBytes = 0;
+    const totalToFetch = end - start + 1;
+
+    for await (const chunk of clientStream) {
+      if (res.destroyed) break;
+      res.write(chunk);
+      currentBytes += chunk.length;
+      if (currentBytes >= totalToFetch) break;
     }
 
+    res.end();
   } catch (error) {
-    console.error('Error in /stream:', error);
+    console.error('Streaming Error:', error);
     if (!res.headersSent) res.status(500).send('Internal Server Error');
   }
 });
 
-// ---------- Webhook Handler ----------
+// ---------- Webhook Endpoint ----------
 app.post('/bot-webhook', async (req, res) => {
   res.sendStatus(200);
 
