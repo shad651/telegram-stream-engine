@@ -2,14 +2,16 @@ require('dotenv').config();
 const express = require('express');
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
+const { Api } = require('telegram');
 const { Readable } = require('stream');
 
-// ---------- Configuration ----------
 const {
   TELEGRAM_API_ID,
   TELEGRAM_API_HASH,
   TELEGRAM_SESSION,
   TELEGRAM_CHANNEL_ID,
+  BOT_TOKEN,
+  RENDER_EXTERNAL_URL,
   PORT = 3000,
 } = process.env;
 
@@ -18,224 +20,123 @@ if (!TELEGRAM_API_ID || !TELEGRAM_API_HASH || !TELEGRAM_SESSION || !TELEGRAM_CHA
   process.exit(1);
 }
 
-// ---------- Telegram Client (singleton) ----------
+const app = express();
+app.use(express.json());
+
 let client = null;
 
 async function getTelegramClient() {
   if (client) return client;
-
   client = new TelegramClient(
     new StringSession(TELEGRAM_SESSION),
-    Number(TELEGRAM_API_ID),
+    parseInt(TELEGRAM_API_ID, 10),
     TELEGRAM_API_HASH,
     { connectionRetries: 5 }
   );
-
-  await client.start();
-  console.log('✅ Telegram client connected.');
+  await client.connect();
+  console.log('✅ Telegram Client Connected');
   return client;
 }
 
-// ---------- Express App ----------
-const app = express();
-
-// Health check
-app.get('/health', (req, res) => res.send('OK'));
-
-// Stream endpoint
+// ---------- Stream Endpoint ----------
 app.get('/stream', async (req, res) => {
-  const msgId = req.query.msg_id;
-  if (!msgId) {
-    return res.status(400).json({ error: 'Missing msg_id parameter' });
-  }
-
   try {
-    const client = await getTelegramClient();
-    const channelId = Number(TELEGRAM_CHANNEL_ID);
+    const msgId = parseInt(req.query.msg_id, 10);
+    if (!msgId) return res.status(400).send('Missing msg_id query parameter.');
 
-    // 1. Fetch message
-    const messages = await client.getMessages(channelId, { ids: [Number(msgId)] });
+    const tgClient = await getTelegramClient();
+    const messages = await tgClient.getMessages(TELEGRAM_CHANNEL_ID, { ids: [msgId] });
+    
+    if (!messages || !messages[0] || !messages[0].media) {
+      return res.status(404).send('Video or message not found.');
+    }
+
     const message = messages[0];
-    if (!message) {
-      return res.status(404).json({ error: 'Message not found' });
-    }
+    const media = message.media.document || message.media.photo;
+    const fileSize = media ? media.size : 0;
 
-    // 2. Verify it's a video
-    const media = message.media;
-    if (!media || !media.document || !media.document.mimeType?.startsWith('video/')) {
-      return res.status(400).json({ error: 'Message does not contain a video' });
-    }
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
 
-    const fileSize = media.document.size;
-    const mimeType = media.document.mimeType || 'video/mp4';
-
-    // 3. Parse Range header
-    const rangeHeader = req.headers.range;
+    const range = req.headers.range;
     let start = 0;
-    let end = fileSize - 1;
-    let statusCode = 200;
+    let end = fileSize ? fileSize - 1 : 0;
 
-    if (rangeHeader) {
-      const parts = rangeHeader.replace(/bytes=/, '').split('-');
+    if (range && fileSize) {
+      const parts = range.replace(/bytes=/, "").split("-");
       start = parseInt(parts[0], 10);
       end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      if (start > end || start >= fileSize) {
-        return res.status(416).json({ error: 'Requested range not satisfiable' });
-      }
-      statusCode = 206;
+      
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+      res.setHeader('Content-Length', (end - start) + 1);
+    } else if (fileSize) {
+      res.setHeader('Content-Length', fileSize);
     }
 
-    // 4. Set response headers
-    const contentLength = end - start + 1;
-    res.status(statusCode);
-    res.setHeader('Content-Type', mimeType);
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Length', contentLength);
-    res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
-    res.setHeader('Cache-Control', 'no-cache');
+    const stream = new Readable({ read() {} });
+    res.on('close', () => stream.destroy());
 
-    // 5. Create a readable stream from Telegram media
-    //    We'll download only the requested range if possible,
-    //    but GramJS `downloadMedia` doesn't support byte ranges natively.
-    //    As a workaround we download the whole file and pipe it,
-    //    but we can still limit the bytes sent to the client.
-    //    However, to truly save bandwidth we would need to seek in the file.
-    //    Since GramJS does not support range download, we download full file
-    //    but we pipe only the requested slice to the client.
-    //    For a production system consider a caching layer or use a custom
-    //    implementation with `client.downloadMedia` with a writable stream
-    //    that discards bytes before `start` and stops after `end`.
+    tgClient.downloadMedia(message.media, {
+      offset: start,
+      limit: end - start + 1,
+      workers: 1,
+      output: stream
+    }).catch(err => console.error('Stream error:', err));
 
-    const outputStream = new Readable({
-      read() {} // no-op, we push data manually
-    });
+    stream.pipe(res);
+  } catch (error) {
+    console.error('Error during streaming:', error);
+    res.status(500).send('Internal Server Error');
+  }
+});
 
-    // We'll create a custom writable stream that filters bytes
-    const filterStream = new (require('stream').Transform)({
-      transform(chunk, encoding, callback) {
-        // We need to track current position relative to file start
-        // This is tricky because we don't know the offset in the stream.
-        // A simpler approach: download the entire file, then slice the buffer.
-        // But that defeats low memory usage.
-        // Instead, we can use `client.downloadMedia` with `outputStream` being
-        // a custom writable that discards bytes outside [start, end].
-        // We'll implement a byte filter as a Transform stream.
-        // We'll keep a global offset variable.
+// ---------- Telegram Bot Webhook ----------
+app.post('/bot-webhook', async (req, res) => {
+  res.sendStatus(200);
+  const update = req.body;
 
-        // Since we're using a Transform, we need to keep state.
-        // We'll use a closure with `this.bytesWritten` or similar.
-        // But simpler: we'll not use the Transform approach; we'll download
-        // into a temp file and then stream range? Not ideal.
-        // The most memory-efficient way with GramJS is to use
-        // `client.downloadMedia(message, { outputFile: writableStream })`
-        // and provide a custom writable that only stores the needed range.
-        // We can implement a writable that writes only if within range.
+  if (update && update.message) {
+    const chatId = update.message.chat.id;
+    const messageId = update.message.message_id;
+    const forwardedMsgId = update.message.forward_from_message_id;
 
-        // === RECOMMENDED APPROACH (Memory efficient) ===
-        // We'll create a custom Writable stream that writes bytes to a buffer
-        // only for the requested range. But we must know the offset.
-        // Since the download stream is sequential, we can count bytes.
-        // Let's implement it below.
+    const targetMsgId = forwardedMsgId || messageId;
+    const baseUrl = RENDER_EXTERNAL_URL || 'https://telegram-stream-engine.onrender.com';
+    const streamUrl = `${baseUrl}/stream?msg_id=${targetMsgId}`;
+
+    const text = `🎬 *Video Stream Link Ready!*\n\n` +
+                 `🆔 *Message ID:* \`${targetMsgId}\`\n\n` +
+                 `🔗 *Direct Stream Link:*\n${streamUrl}`;
+
+    if (BOT_TOKEN) {
+      try {
+        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: text,
+            parse_mode: 'Markdown'
+          })
+        });
+      } catch (e) {
+        console.error('Failed to send bot message:', e);
       }
-    });
-
-    // Instead of the above complex Transform, I'll present a clean solution:
-    // Use a custom writable that tracks bytes and pushes to the response.
-    // We'll create a "range writable" that writes to a buffer and then
-    // to response when ready, but we want to stream to response immediately.
-    // Actually, we can create a PassThrough stream and pipe the download
-    // to it, then we use a Transform stream that drops bytes outside range.
-    // That Transform will keep an internal counter.
-
-    // ---------- Implementation with Transform (low memory) ----------
-    const { Transform } = require('stream');
-    let bytesWritten = 0;
-    let bytesSent = 0;
-
-    const rangeFilter = new Transform({
-      transform(chunk, encoding, callback) {
-        const chunkSize = chunk.length;
-        const chunkStart = bytesWritten;
-        const chunkEnd = bytesWritten + chunkSize - 1;
-        bytesWritten += chunkSize;
-
-        // Check if this chunk overlaps the requested range
-        if (chunkEnd < start || chunkStart > end) {
-          // No overlap, discard
-          return callback();
-        }
-
-        // Calculate slice offsets within this chunk
-        const sliceStart = Math.max(0, start - chunkStart);
-        const sliceEnd = Math.min(chunkSize - 1, end - chunkStart);
-        const slice = chunk.subarray(sliceStart, sliceEnd + 1);
-
-        bytesSent += slice.length;
-        this.push(slice);
-        callback();
-      },
-      // We need to flush any remaining data? Not necessary.
-    });
-
-    // Now pipe the download into the rangeFilter, then to response
-    // But we need to handle downloadMedia with a writable stream.
-    // We can create a PassThrough stream and pipe it.
-    const passThrough = new (require('stream').PassThrough)();
-
-    // We'll start the download asynchronously and pipe to passThrough
-    // We need to catch errors.
-    const downloadPromise = client.downloadMedia(message, {
-      outputStream: passThrough,
-      // Optional: progress callback
-    });
-
-    // Pipe through range filter and then to response
-    passThrough
-      .pipe(rangeFilter)
-      .pipe(res)
-      .on('error', (err) => {
-        console.error('Stream error:', err);
-        if (!res.headersSent) res.status(500).end();
-      });
-
-    // Wait for download to finish (or error)
-    try {
-      await downloadPromise;
-      // When download completes, end the response if not already ended
-      if (!res.writableEnded) res.end();
-    } catch (downloadErr) {
-      console.error('Download error:', downloadErr);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Failed to download media' });
-      } else {
-        res.destroy(downloadErr);
-      }
-    }
-
-    // Clean up on client abort
-    req.on('aborted', () => {
-      passThrough.destroy();
-      rangeFilter.destroy();
-    });
-
-  } catch (err) {
-    console.error('Stream error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Internal server error' });
-    } else {
-      res.end();
     }
   }
 });
 
-// ---------- Start Server ----------
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`   Stream endpoint: http://localhost:${PORT}/stream?msg_id=<id>`);
-});
-
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  if (client) await client.disconnect();
-  process.exit(0);
+  
+  // Auto set bot webhook
+  if (BOT_TOKEN && RENDER_EXTERNAL_URL) {
+    try {
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${RENDER_EXTERNAL_URL}/bot-webhook`);
+      console.log('🤖 Bot Webhook Configured Successfully');
+    } catch (e) {
+      console.error('Webhook set error:', e);
+    }
+  }
 });
