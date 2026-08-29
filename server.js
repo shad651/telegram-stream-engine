@@ -1,105 +1,63 @@
 require('dotenv').config();
 const express = require('express');
-const { TelegramClient } = require('telegram');
-const { StringSession } = require('telegram/sessions');
-const { CustomFile } = require('telegram/client/uploads');
 
 const {
-  TELEGRAM_API_ID,
-  TELEGRAM_API_HASH,
-  TELEGRAM_SESSION,
-  TELEGRAM_CHANNEL_ID,
   BOT_TOKEN,
   RENDER_EXTERNAL_URL,
   PORT = 3000,
 } = process.env;
 
-if (!TELEGRAM_API_ID || !TELEGRAM_API_HASH || !TELEGRAM_SESSION || !TELEGRAM_CHANNEL_ID) {
-  console.error('❌ Missing required environment variables.');
+if (!BOT_TOKEN) {
+  console.error('❌ Missing BOT_TOKEN variable.');
   process.exit(1);
 }
 
 const app = express();
 app.use(express.json());
 
-let client = null;
-
-async function getTelegramClient() {
-  if (client && client.connected) return client;
-  client = new TelegramClient(
-    new StringSession(TELEGRAM_SESSION),
-    parseInt(TELEGRAM_API_ID, 10),
-    TELEGRAM_API_HASH,
-    { connectionRetries: 5 }
-  );
-  await client.connect();
-  console.log('✅ Telegram Client Connected');
-  return client;
-}
-
 app.get('/', (req, res) => res.send('Server is active 🚀'));
 
-// ---------- Chunked Stream Endpoint ----------
+// ---------- Direct Fast Bot File Stream Endpoint ----------
 app.get('/stream', async (req, res) => {
   try {
-    const msgId = parseInt(req.query.msg_id, 10);
-    if (!msgId) return res.status(400).send('Missing msg_id');
+    const fileId = req.query.file_id;
+    if (!fileId) return res.status(400).send('Missing file_id parameter.');
 
-    const tgClient = await getTelegramClient();
-    const messages = await tgClient.getMessages(TELEGRAM_CHANNEL_ID, { ids: [msgId] });
+    // Step 1: Get file path from Telegram Bot API
+    const getFileResp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
+    const fileData = await getFileResp.json();
 
-    if (!messages || !messages[0] || !messages[0].media) {
-      return res.status(404).send('Media not found');
+    if (!fileData.ok || !fileData.result.file_path) {
+      return res.status(404).send('File not found on Telegram servers.');
     }
 
-    const message = messages[0];
-    const media = message.media.document || message.media.video || message.media.photo;
-    const fileSize = media ? media.size : 0;
+    const filePath = fileData.result.file_path;
+    const downloadUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
 
-    const range = req.headers.range;
-    let start = 0;
-    let end = fileSize ? fileSize - 1 : 0;
-
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Accept-Ranges', 'bytes');
-
-    if (range && fileSize) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      start = parseInt(parts[0], 10);
-      end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-
-      res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
-      res.setHeader('Content-Length', (end - start) + 1);
-    } else if (fileSize) {
-      res.setHeader('Content-Length', fileSize);
-    }
-
-    // Download in stream chunks (64KB chunks)
-    const clientStream = tgClient.iterDownload({
-      file: message.media,
-      offset: BigInt(start),
-      requestSize: 512 * 1024,
+    // Step 2: Stream file directly from Telegram File Server
+    const mediaResp = await fetch(downloadUrl, {
+      headers: req.headers.range ? { 'Range': req.headers.range } : {}
     });
 
-    let currentBytes = 0;
-    const totalToFetch = end - start + 1;
-
-    for await (const chunk of clientStream) {
-      if (res.destroyed) break;
-      res.write(chunk);
-      currentBytes += chunk.length;
-      if (currentBytes >= totalToFetch) break;
+    res.setHeader('Content-Type', mediaResp.headers.get('content-type') || 'video/mp4');
+    if (mediaResp.headers.get('content-length')) {
+      res.setHeader('Content-Length', mediaResp.headers.get('content-length'));
+    }
+    if (mediaResp.headers.get('content-range')) {
+      res.setHeader('Content-Range', mediaResp.headers.get('content-range'));
+      res.status(206);
     }
 
-    res.end();
+    const arrayBuffer = await mediaResp.arrayBuffer();
+    res.send(Buffer.from(arrayBuffer));
+
   } catch (error) {
     console.error('Streaming Error:', error);
     if (!res.headersSent) res.status(500).send('Internal Server Error');
   }
 });
 
-// ---------- Webhook Endpoint ----------
+// ---------- Telegram Bot Webhook Endpoint ----------
 app.post('/bot-webhook', async (req, res) => {
   res.sendStatus(200);
 
@@ -109,26 +67,28 @@ app.post('/bot-webhook', async (req, res) => {
     if (!msg) return;
 
     const chatId = msg.chat.id;
-    const targetMsgId = msg.forward_from_message_id || msg.message_id;
+    const video = msg.video || msg.document;
 
+    if (!video || !video.file_id) {
+      return;
+    }
+
+    const fileId = video.file_id;
     const baseUrl = RENDER_EXTERNAL_URL || 'https://telegram-stream-engine.onrender.com';
-    const streamUrl = `${baseUrl}/stream?msg_id=${targetMsgId}`;
+    const streamUrl = `${baseUrl}/stream?file_id=${fileId}`;
 
     const replyText = `🎬 <b>Video Stream Link Ready!</b>\n\n` +
-                      `🆔 <b>Message ID:</b> <code>${targetMsgId}</code>\n\n` +
                       `🔗 <b>Direct Stream Link:</b>\n${streamUrl}`;
 
-    if (BOT_TOKEN) {
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: replyText,
-          parse_mode: 'HTML'
-        })
-      });
-    }
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: replyText,
+        parse_mode: 'HTML'
+      })
+    });
   } catch (err) {
     console.error("❌ Error in webhook:", err);
   }
