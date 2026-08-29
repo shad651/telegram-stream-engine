@@ -100,10 +100,7 @@ app.post('/bot-webhook', async (req, res) => {
 
     const msg = update.message || update.channel_post || update.edited_message;
 
-    if (!msg) {
-      console.log("⚠️ Received update with no playable message body.");
-      return;
-    }
+    if (!msg) return;
 
     const chatId = msg.chat.id;
     const targetMsgId = msg.forward_from_message_id || msg.message_id;
@@ -111,9 +108,10 @@ app.post('/bot-webhook', async (req, res) => {
     const baseUrl = RENDER_EXTERNAL_URL || 'https://telegram-stream-engine.onrender.com';
     const streamUrl = `${baseUrl}/stream?msg_id=${targetMsgId}`;
 
-    const replyText = `🎬 *Video Stream Link Ready!*\n\n` +
-                      `🆔 *Message ID:* \`${targetMsgId}\`\n\n` +
-                      `🔗 *Direct Stream Link:*\n${streamUrl}`;
+    // HTML Formatting used to prevent entity parsing errors
+    const replyText = `🎬 <b>Video Stream Link Ready!</b>\n\n` +
+                      `🆔 <b>Message ID:</b> <code>${targetMsgId}</code>\n\n` +
+                      `🔗 <b>Direct Stream Link:</b>\n${streamUrl}`;
 
     if (BOT_TOKEN) {
       const resp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -122,28 +120,13 @@ app.post('/bot-webhook', async (req, res) => {
         body: JSON.stringify({
           chat_id: chatId,
           text: replyText,
-          parse_mode: 'Markdown'
+          parse_mode: 'HTML'
         })
       });
       const resData = await resp.json();
       console.log("🤖 Telegram API Delivery Status:", resData);
-    } else {
-      console.error("❌ BOT_TOKEN environment variable missing.");
     }
   } catch (err) {
     console.error("❌ Error processing webhook event:", err);
-  }
-});
-
-app.listen(PORT, async () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-
-  if (BOT_TOKEN && RENDER_EXTERNAL_URL) {
-    try {
-      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${RENDER_EXTERNAL_URL}/bot-webhook`);
-      console.log('🤖 Bot Webhook Configured Successfully');
-    } catch (e) {
-      console.error('Webhook set error:', e);
-    }
   }
 });
