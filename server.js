@@ -25,7 +25,7 @@ app.use(express.json());
 let client = null;
 
 async function getTelegramClient() {
-  if (client) return client;
+  if (client && client.connected) return client;
   client = new TelegramClient(
     new StringSession(TELEGRAM_SESSION),
     parseInt(TELEGRAM_API_ID, 10),
@@ -37,11 +37,16 @@ async function getTelegramClient() {
   return client;
 }
 
+// Health Check Endpoint (Keep-Alive)
+app.get('/', (req, res) => {
+  res.send('Server is active and running 🚀');
+});
+
 // ---------- Direct Stream Endpoint ----------
 app.get('/stream', async (req, res) => {
   try {
     const msgId = parseInt(req.query.msg_id, 10);
-    if (!msgId) return res.status(400).send('Missing msg_id query parameter.');
+    if (!msgId) return res.status(400).send('Missing msg_id parameter.');
 
     const tgClient = await getTelegramClient();
     const messages = await tgClient.getMessages(TELEGRAM_CHANNEL_ID, { ids: [msgId] });
@@ -54,10 +59,10 @@ app.get('/stream', async (req, res) => {
     const media = message.media.document || message.media.photo;
     const fileSize = media ? media.size : 0;
 
+    const range = req.headers.range;
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Accept-Ranges', 'bytes');
 
-    const range = req.headers.range;
     let start = 0;
     let end = fileSize ? fileSize - 1 : 0;
 
@@ -74,19 +79,25 @@ app.get('/stream', async (req, res) => {
     }
 
     const stream = new Readable({ read() {} });
-    res.on('close', () => stream.destroy());
+    
+    res.on('close', () => {
+      stream.destroy();
+    });
 
     tgClient.downloadMedia(message.media, {
-      offset: start,
+      offset: BigInt(start),
       limit: end - start + 1,
       workers: 1,
       output: stream
-    }).catch(err => console.error('Stream error:', err));
+    }).catch(err => {
+      console.error('Download stream error:', err);
+      if (!res.headersSent) res.status(500).send('Streaming error');
+    });
 
     stream.pipe(res);
   } catch (error) {
-    console.error('Error during streaming:', error);
-    res.status(500).send('Internal Server Error');
+    console.error('Error in /stream:', error);
+    if (!res.headersSent) res.status(500).send('Internal Server Error');
   }
 });
 
@@ -99,7 +110,6 @@ app.post('/bot-webhook', async (req, res) => {
     console.log("📩 Webhook Event Received:", JSON.stringify(update));
 
     const msg = update.message || update.channel_post || update.edited_message;
-
     if (!msg) return;
 
     const chatId = msg.chat.id;
