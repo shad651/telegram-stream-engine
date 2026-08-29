@@ -108,7 +108,6 @@ app.post('/bot-webhook', async (req, res) => {
     const baseUrl = RENDER_EXTERNAL_URL || 'https://telegram-stream-engine.onrender.com';
     const streamUrl = `${baseUrl}/stream?msg_id=${targetMsgId}`;
 
-    // HTML Formatting used to prevent entity parsing errors
     const replyText = `🎬 <b>Video Stream Link Ready!</b>\n\n` +
                       `🆔 <b>Message ID:</b> <code>${targetMsgId}</code>\n\n` +
                       `🔗 <b>Direct Stream Link:</b>\n${streamUrl}`;
@@ -128,5 +127,18 @@ app.post('/bot-webhook', async (req, res) => {
     }
   } catch (err) {
     console.error("❌ Error processing webhook event:", err);
+  }
+});
+
+app.listen(PORT, async () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+
+  if (BOT_TOKEN && RENDER_EXTERNAL_URL) {
+    try {
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${RENDER_EXTERNAL_URL}/bot-webhook`);
+      console.log('🤖 Bot Webhook Configured Successfully');
+    } catch (e) {
+      console.error('Webhook set error:', e);
+    }
   }
 });
