@@ -1,59 +1,105 @@
 require('dotenv').config();
 const express = require('express');
+const { TelegramClient } = require('telegram');
+const { StringSession } = require('telegram/sessions');
 
 const {
+  TELEGRAM_API_ID,
+  TELEGRAM_API_HASH,
+  TELEGRAM_SESSION,
+  TELEGRAM_CHANNEL_ID,
   BOT_TOKEN,
   RENDER_EXTERNAL_URL,
   PORT = 3000,
 } = process.env;
 
-if (!BOT_TOKEN) {
-  console.error('❌ Missing BOT_TOKEN variable.');
+if (!TELEGRAM_API_ID || !TELEGRAM_API_HASH || !TELEGRAM_SESSION || !TELEGRAM_CHANNEL_ID || !BOT_TOKEN) {
+  console.error('❌ Missing required environment variables.');
   process.exit(1);
 }
 
 const app = express();
 app.use(express.json());
 
+let client = null;
+
+async function getTelegramClient() {
+  if (client && client.connected) return client;
+  client = new TelegramClient(
+    new StringSession(TELEGRAM_SESSION),
+    parseInt(TELEGRAM_API_ID, 10),
+    TELEGRAM_API_HASH,
+    { connectionRetries: 5 }
+  );
+  await client.connect();
+  console.log('✅ Telegram Client Connected');
+  return client;
+}
+
 app.get('/', (req, res) => res.send('Server is active 🚀'));
 
-// ---------- Direct Fast Bot File Stream Endpoint ----------
+// ---------- Hybrid Stream Endpoint (Small & Large Videos) ----------
 app.get('/stream', async (req, res) => {
   try {
     const fileId = req.query.file_id;
-    if (!fileId) return res.status(400).send('Missing file_id parameter.');
+    const msgId = req.query.msg_id;
 
-    // Step 1: Get file path from Telegram Bot API
-    const getFileResp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
-    const fileData = await getFileResp.json();
+    // 1. Method 1: Bot API Stream for Small Files (< 20 MB)
+    if (fileId) {
+      const getFileResp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
+      const fileData = await getFileResp.json();
 
-    if (!fileData.ok || !fileData.result.file_path) {
-      return res.status(404).send('File not found on Telegram servers.');
+      if (fileData.ok && fileData.result && fileData.result.file_path) {
+        const downloadUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${fileData.result.file_path}`;
+        const mediaResp = await fetch(downloadUrl, {
+          headers: req.headers.range ? { 'Range': req.headers.range } : {}
+        });
+
+        res.setHeader('Content-Type', mediaResp.headers.get('content-type') || 'video/mp4');
+        if (mediaResp.headers.get('content-length')) res.setHeader('Content-Length', mediaResp.headers.get('content-length'));
+        if (mediaResp.headers.get('content-range')) {
+          res.setHeader('Content-Range', mediaResp.headers.get('content-range'));
+          res.status(206);
+        }
+
+        const arrayBuffer = await mediaResp.arrayBuffer();
+        return res.send(Buffer.from(arrayBuffer));
+      }
     }
 
-    const filePath = fileData.result.file_path;
-    const downloadUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+    // 2. Method 2: GramJS Client Stream for Large Files (> 20 MB)
+    if (msgId) {
+      const tgClient = await getTelegramClient();
+      const messages = await tgClient.getMessages(TELEGRAM_CHANNEL_ID, { ids: [parseInt(msgId, 10)] });
 
-    // Step 2: Stream file directly from Telegram File Server
-    const mediaResp = await fetch(downloadUrl, {
-      headers: req.headers.range ? { 'Range': req.headers.range } : {}
-    });
+      if (!messages || !messages[0] || !messages[0].media) {
+        return res.status(404).send('Media not found on Channel');
+      }
 
-    res.setHeader('Content-Type', mediaResp.headers.get('content-type') || 'video/mp4');
-    if (mediaResp.headers.get('content-length')) {
-      res.setHeader('Content-Length', mediaResp.headers.get('content-length'));
+      const message = messages[0];
+      const media = message.media.document || message.media.video || message.media.photo;
+      const fileSize = media ? media.size : 0;
+
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Accept-Ranges', 'bytes');
+      if (fileSize) res.setHeader('Content-Length', fileSize);
+
+      const clientStream = tgClient.iterDownload({
+        file: message.media,
+        requestSize: 512 * 1024,
+      });
+
+      for await (const chunk of clientStream) {
+        if (res.destroyed) break;
+        res.write(chunk);
+      }
+      return res.end();
     }
-    if (mediaResp.headers.get('content-range')) {
-      res.setHeader('Content-Range', mediaResp.headers.get('content-range'));
-      res.status(206);
-    }
 
-    const arrayBuffer = await mediaResp.arrayBuffer();
-    res.send(Buffer.from(arrayBuffer));
-
+    res.status(400).send('Missing stream parameters.');
   } catch (error) {
-    console.error('Streaming Error:', error);
-    if (!res.headersSent) res.status(500).send('Internal Server Error');
+    console.error('Streaming error:', error);
+    if (!res.headersSent) res.status(500).send('Streaming Failed');
   }
 });
 
@@ -68,16 +114,20 @@ app.post('/bot-webhook', async (req, res) => {
 
     const chatId = msg.chat.id;
     const video = msg.video || msg.document;
+    const targetMsgId = msg.forward_from_message_id || msg.message_id;
 
-    if (!video || !video.file_id) {
-      return;
+    const baseUrl = RENDER_EXTERNAL_URL || 'https://telegram-stream-engine.onrender.com';
+    
+    // Auto Select Link Type based on File Size
+    let streamUrl = '';
+    if (video && video.file_size && video.file_size < 20 * 1024 * 1024) {
+      streamUrl = `${baseUrl}/stream?file_id=${video.file_id}`;
+    } else {
+      streamUrl = `${baseUrl}/stream?msg_id=${targetMsgId}`;
     }
 
-    const fileId = video.file_id;
-    const baseUrl = RENDER_EXTERNAL_URL || 'https://telegram-stream-engine.onrender.com';
-    const streamUrl = `${baseUrl}/stream?file_id=${fileId}`;
-
     const replyText = `🎬 <b>Video Stream Link Ready!</b>\n\n` +
+                      `🆔 <b>Msg ID:</b> <code>${targetMsgId}</code>\n\n` +
                       `🔗 <b>Direct Stream Link:</b>\n${streamUrl}`;
 
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
