@@ -38,13 +38,13 @@ async function getTelegramClient() {
 
 app.get('/', (req, res) => res.send('Server is active 🚀'));
 
-// ---------- Hybrid Stream Endpoint (Small & Large Videos) ----------
+// ---------- Fast Chunked Stream Endpoint ----------
 app.get('/stream', async (req, res) => {
   try {
     const fileId = req.query.file_id;
     const msgId = req.query.msg_id;
 
-    // 1. Method 1: Bot API Stream for Small Files (< 20 MB)
+    // Small File Stream (< 20 MB)
     if (fileId) {
       const getFileResp = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
       const fileData = await getFileResp.json();
@@ -67,7 +67,7 @@ app.get('/stream', async (req, res) => {
       }
     }
 
-    // 2. Method 2: GramJS Client Stream for Large Files (> 20 MB)
+    // Large File Stream (> 20 MB) with Fast Range Handling
     if (msgId) {
       const tgClient = await getTelegramClient();
       const messages = await tgClient.getMessages(TELEGRAM_CHANNEL_ID, { ids: [parseInt(msgId, 10)] });
@@ -80,19 +80,42 @@ app.get('/stream', async (req, res) => {
       const media = message.media.document || message.media.video || message.media.photo;
       const fileSize = media ? media.size : 0;
 
+      const range = req.headers.range;
+      let start = 0;
+      let end = fileSize ? fileSize - 1 : 0;
+
+      if (range && fileSize) {
+        const parts = range.replace(/bytes=/, "").split("-");
+        start = parseInt(parts[0], 10);
+        end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+        res.setHeader('Content-Length', (end - start) + 1);
+      } else if (fileSize) {
+        res.setHeader('Content-Length', fileSize);
+      }
+
       res.setHeader('Content-Type', 'video/mp4');
       res.setHeader('Accept-Ranges', 'bytes');
-      if (fileSize) res.setHeader('Content-Length', fileSize);
 
+      // Optimized for low RAM (128KB Chunks)
       const clientStream = tgClient.iterDownload({
         file: message.media,
-        requestSize: 512 * 1024,
+        offset: BigInt(start),
+        requestSize: 128 * 1024,
       });
+
+      let bytesSent = 0;
+      const bytesToFetch = end - start + 1;
 
       for await (const chunk of clientStream) {
         if (res.destroyed) break;
         res.write(chunk);
+        bytesSent += chunk.length;
+        if (bytesSent >= bytesToFetch) break;
       }
+
       return res.end();
     }
 
@@ -118,7 +141,6 @@ app.post('/bot-webhook', async (req, res) => {
 
     const baseUrl = RENDER_EXTERNAL_URL || 'https://telegram-stream-engine.onrender.com';
     
-    // Auto Select Link Type based on File Size
     let streamUrl = '';
     if (video && video.file_size && video.file_size < 20 * 1024 * 1024) {
       streamUrl = `${baseUrl}/stream?file_id=${video.file_id}`;
