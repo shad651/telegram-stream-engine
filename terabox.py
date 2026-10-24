@@ -2,6 +2,7 @@ import sys
 import requests
 import re
 import json
+from urllib.parse import urlparse
 
 def extract_surl(url):
     match = re.search(r'surl=([a-zA-Z0-9_-]+)', url)
@@ -24,9 +25,11 @@ def get_terabox_link(terabox_url):
     
     print(f"[+] Extracted SURL Code: {surl}")
     
-    # Ab hum wrapper ko chhod kar seedha official TeraBox domain use karenge
-    base_domain = "www.terabox.com"
+    parsed_url = urlparse(terabox_url)
+    base_domain = parsed_url.netloc if parsed_url.netloc else "terasharelink.com"
+    print(f"[+] Using Working Domain: {base_domain}")
     
+    # Session object automatically cookies store karta hai
     session = requests.Session()
     
     headers = {
@@ -34,41 +37,45 @@ def get_terabox_link(terabox_url):
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Connection": "keep-alive",
-        "Referer": "https://www.terabox.com/"
+        "Referer": f"https://{base_domain}/"
     }
     
-    api_url = f"https://{base_domain}/sharing/link?surl={surl}"
-    
     try:
-        print(f"[*] Official TeraBox server se data fetch ho raha hai...")
-        response = session.get(api_url, headers=headers, timeout=15, allow_redirects=True)
+        # Step 1: Pehle main page hit karke cookies/session establish karna
+        initial_url = f"https://{base_domain}/s/{surl}"
+        print(f"[*] Step 1: Session establish ho raha hai ({base_domain})...")
+        res1 = session.get(initial_url, headers=headers, timeout=15)
         
-        print(f"[+] Status Code Received: {response.status_code}")
+        print(f"[+] Step 1 Status: {res1.status_code}")
         
-        if response.status_code == 200:
-            html_content = response.text
+        if res1.status_code == 200:
+            html_content = res1.text
             
-            # YunData ya script tags ke andar file ki details dhoondhna
-            match_yundata = re.search(r'yunData\s*=\s*(\{.*?\});', html_content, re.DOTALL)
-            
-            if match_yundata:
-                print("[+] Success! 'yunData' mil gaya.")
-                raw_json = match_yundata.group(1)
-                try:
-                    data = json.loads(raw_json)
-                    print("\n[!] File Details:")
-                    print(json.dumps(data, indent=4))
-                except:
-                    print("[-] JSON decode karne me error aayi.")
-            else:
-                print("[-] yunData direct nahi mila. HTML me doosre patterns check ho rahe hain...")
-                # File name ya dlink keywords check karna
-                if "file_name" in html_content or "dlink" in html_content:
-                    print("[+] Page par file data maujud hai!")
+            # Check karte hain ki file data direct mila ya nahi
+            if "file_name" in html_content or "dlink" in html_content or "download" in html_content:
+                print("[+] Success! Page ke andar file data mil gaya.")
+                # Yahan hum script tags ya JSON dhoond sakte hain
+                match_data = re.search(r'data\s*=\s*(\{.*?\});', html_content, re.DOTALL)
+                if match_data:
+                    print("[+] Extracted Payload JSON:")
+                    print(match_data.group(1)[:500])
                 else:
-                    print("[-] Page par anti-bot ya login wall active hai.")
+                    print("[!] Data raw HTML me maujud hai. (Response length:", len(html_content), "chars)")
+            else:
+                print("[-] Page par abhi bhi anti-bot challenge ya redirect hai. Cookies update ho rahi hain...")
+                
+                # Step 2: Agar cookies set hui hain toh same session se dobara hit karna
+                print(f"[*] Step 2: Data endpoint par request bhej rahe hain...")
+                api_url = f"https://{base_domain}/sharing/link?surl={surl}"
+                res2 = session.get(api_url, headers=headers, timeout=15)
+                print(f"[+] Step 2 Status: {res2.status_code}")
+                if "file_name" in res2.text or "dlink" in res2.text:
+                    print("[+] Step 2 me file data successfully mil gaya!")
+                else:
+                    print("[-] Anti-bot challenge bypass nahi ho paya. Response preview:")
+                    print(res2.text[:300])
         else:
-            print(f"[-] Request failed with status code: {response.status_code}")
+            print(f"[-] Initial request failed with status: {res1.status_code}")
             
     except Exception as e:
         print(f"[-] Error aa gaya: {str(e)}")
