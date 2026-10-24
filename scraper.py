@@ -35,6 +35,12 @@ def fetch_terabox_data(surl, original_domain):
             
             if res1.status_code == 200:
                 content = res1.text
+
+print(f"[DEBUG] Status: {res1.status_code}")
+print(f"[DEBUG] Final URL: {res1.url}")
+print(f"[DEBUG] Content-Type: {res1.headers.get('Content-Type')}")
+print(f"[DEBUG] Response Length: {len(content)}")
+print(f"[DEBUG] First 300 characters: {content[:300]!r}")
                 
                 # Check karna ki BadJs bypass hua ya nahi
                 if "BadJs" not in content and "juicyads" not in content.lower():
