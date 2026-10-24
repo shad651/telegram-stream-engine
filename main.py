@@ -26,6 +26,11 @@ original_domain = get_domain(test_url)
 html_content = fetch_terabox_data(surl, original_domain)
 
 if html_content:
+
+        with open("response.html", "w", encoding="utf-8") as f:
+            f.write(html_content)
+
+        print("[+] HTML response response.html mein save ho gaya.")
     print("\n[+] Response successfully receive hua!")
     print(f"[!] Total Content Length: {len(html_content)} characters")
 
