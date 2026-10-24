@@ -37,7 +37,12 @@ def fetch_terabox_data(surl, original_domain):
             print(f"[DEBUG] Final URL: {res1.url}")
             print(f"[DEBUG] Content-Type: {res1.headers.get('Content-Type')}")
             print(f"[DEBUG] Response Length: {len(res1.text)}")
-            print(f"[DEBUG] First 300 characters: {res1.text[:300]!r}")
+            print(f"[DEBUG] First 300 characters: {res1.text[:300]!r}") 
+
+            with open("response.html", "w", encoding="utf-8") as f:
+                f.write(response.text)
+
+            print("[+] HTML saved to response.html")
 
             if res1.status_code == 200:
                 content = res1.text
