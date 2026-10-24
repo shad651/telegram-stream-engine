@@ -1,8 +1,8 @@
 import sys
-import requests
 import re
 import json
 from urllib.parse import urlparse
+from curl_cffi import requests
 
 def extract_surl(url):
     match = re.search(r'surl=([a-zA-Z0-9_-]+)', url)
@@ -27,55 +27,39 @@ def get_terabox_link(terabox_url):
     
     parsed_url = urlparse(terabox_url)
     base_domain = parsed_url.netloc if parsed_url.netloc else "terasharelink.com"
-    print(f"[+] Using Working Domain: {base_domain}")
+    print(f"[+] Using Domain: {base_domain}")
     
-    # Session object automatically cookies store karta hai
-    session = requests.Session()
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Connection": "keep-alive",
-        "Referer": f"https://{base_domain}/"
-    }
+    # Target API endpoint jahan file ka actual data hota hai
+    api_url = f"https://{base_domain}/sharing/link?surl={surl}"
     
     try:
-        # Step 1: Pehle main page hit karke cookies/session establish karna
-        initial_url = f"https://{base_domain}/s/{surl}"
-        print(f"[*] Step 1: Session establish ho raha hai ({base_domain})...")
-        res1 = session.get(initial_url, headers=headers, timeout=15)
+        print(f"[*] Bypass request bhej rahe hain (curl_cffi)...")
         
-        print(f"[+] Step 1 Status: {res1.status_code}")
+        # impersonate='chrome120' server ko yakeen dilata hai ki ye real Chrome browser hai
+        response = requests.get(api_url, impersonate="chrome120", timeout=15)
         
-        if res1.status_code == 200:
-            html_content = res1.text
+        print(f"[+] Status Code: {response.status_code}")
+        
+        if response.status_code == 200:
+            html_content = response.text
             
-            # Check karte hain ki file data direct mila ya nahi
-            if "file_name" in html_content or "dlink" in html_content or "download" in html_content:
-                print("[+] Success! Page ke andar file data mil gaya.")
-                # Yahan hum script tags ya JSON dhoond sakte hain
+            # Check karte hain ki file data mila ya nahi
+            if "file_name" in html_content or "dlink" in html_content:
+                print("[+] Success! File data mil gaya!")
+                
+                # JSON ya script data extract karne ki koshish
                 match_data = re.search(r'data\s*=\s*(\{.*?\});', html_content, re.DOTALL)
                 if match_data:
-                    print("[+] Extracted Payload JSON:")
-                    print(match_data.group(1)[:500])
+                    print("\n[!] Extracted Data Payload:")
+                    print(match_data.group(1)[:600])
                 else:
-                    print("[!] Data raw HTML me maujud hai. (Response length:", len(html_content), "chars)")
+                    print("\n[!] Response text (First 500 characters):")
+                    print(html_content[:500])
             else:
-                print("[-] Page par abhi bhi anti-bot challenge ya redirect hai. Cookies update ho rahi hain...")
-                
-                # Step 2: Agar cookies set hui hain toh same session se dobara hit karna
-                print(f"[*] Step 2: Data endpoint par request bhej rahe hain...")
-                api_url = f"https://{base_domain}/sharing/link?surl={surl}"
-                res2 = session.get(api_url, headers=headers, timeout=15)
-                print(f"[+] Step 2 Status: {res2.status_code}")
-                if "file_name" in res2.text or "dlink" in res2.text:
-                    print("[+] Step 2 me file data successfully mil gaya!")
-                else:
-                    print("[-] Anti-bot challenge bypass nahi ho paya. Response preview:")
-                    print(res2.text[:300])
+                print("[-] Anti-bot challenge abhi bhi active hai. Response preview:")
+                print(html_content[:300])
         else:
-            print(f"[-] Initial request failed with status: {res1.status_code}")
+            print(f"[-] Request failed with status: {response.status_code}")
             
     except Exception as e:
         print(f"[-] Error aa gaya: {str(e)}")
