@@ -3,8 +3,6 @@ import requests
 import re
 
 def extract_surl(url):
-    """TeraBox URL se unique surl code nikalne ka function"""
-    # Agar URL me 'surl=' hai ya /s/ hai
     match = re.search(r'surl=([a-zA-Z0-9_-]+)', url)
     if match:
         return match.group(1)
@@ -20,33 +18,39 @@ def get_terabox_link(terabox_url):
     
     surl = extract_surl(terabox_url)
     if not surl:
-        print("[-] Error: URL se valid surl code nahi mila. Link check karein.")
+        print("[-] Error: URL se valid surl code nahi mila.")
         return
     
     print(f"[+] Extracted SURL Code: {surl}")
     
-    # TeraBox web client headers taaki request block na ho
+    # Session use karte hain taaki cookies maintain rahein
+    session = requests.Session()
+    
+    # Real browser jaise headers
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
         "Referer": "https://www.terabox.com/"
     }
     
-    # TeraBox info API endpoint
     api_url = f"https://www.terabox.com/sharing/link?surl={surl}"
     
     try:
         print("[*] TeraBox server se data fetch ho raha hai...")
-        response = requests.get(api_url, headers=headers, timeout=10)
+        # Headers aur timeout ke sath request bhej rahe hain
+        response = session.get(api_url, headers=headers, timeout=15, allow_redirects=True)
+        
+        print(f"[+] Status Code Received: {response.status_code}")
         
         if response.status_code == 200:
-            # Check karte hain ki file data mil gaya kya
-            if "dlink" in response.text or "file_name" in response.text:
-                print("[+] Success! Page response mil gaya.")
-                # Yahan se file ka naam aur direct download link extract kiya jata hai
-                print("\n[!] Raw API Response Headers/Data fetched successfully.")
-                print("Tip: TeraBox ki direct link API ko fully parse karne ke liye cookies aur sign token ki zarurat padti hai.")
+            if "dlink" in response.text or "file_name" in response.text or "surl" in response.text:
+                print("[+] Success! Server ne data de diya.")
+                print(f"[!] Response Length: {len(response.text)} characters")
             else:
-                print("[-] Server ne response diya par file data nahi mila (Ho sakta hai link expired ho).")
+                print("[-] Server ne response diya, par anti-bot page ya login page aa gaya hai.")
         else:
             print(f"[-] Request failed with status code: {response.status_code}")
             
@@ -54,7 +58,6 @@ def get_terabox_link(terabox_url):
         print(f"[-] Error aa gaya: {str(e)}")
 
 if __name__ == "__main__":
-    # Aap yahan apna koi bhi TeraBox link daal sakte hain test karne ke liye
     test_url = input("TeraBox Link Enter karein: ").strip()
     if test_url:
         get_terabox_link(test_url)
