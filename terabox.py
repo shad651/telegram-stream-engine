@@ -1,6 +1,7 @@
 import sys
 import requests
 import re
+import json
 from urllib.parse import urlparse
 
 def extract_surl(url):
@@ -42,30 +43,27 @@ def get_terabox_link(terabox_url):
     api_url = f"https://{base_domain}/sharing/link?surl={surl}"
     
     try:
-        print(f"[*] Data fetch ho raha hai...")
+        print(f"[*] Page fetch kiya ja raha hai...")
         response = session.get(api_url, headers=headers, timeout=15, allow_redirects=True)
-        
-        print(f"[+] Status Code Received: {response.status_code}")
         
         if response.status_code == 200:
             html_content = response.text
-            print("[+] Success! HTML page mil gaya.")
+            print("[+] Success! HTML data mil gaya.")
             
-            # TeraBox page ke andar JavaScript variables (yunData / sign / token) dhoondhna
-            # Yeh data file ki info contain karta hai
-            sign_match = re.search(r'sign\s*[:=]\s*["\']([a-zA-Z0-9_-]+)["\']', html_content)
-            timestamp_match = re.search(r'timestamp\s*[:=]\s*([0-9]+)', html_content)
+            # TeraBox ke page me 'yunData' variable ko dhoondhna
+            match_yundata = re.search(r'yunData\s*=\s*(\{.*?\});', html_content, re.DOTALL)
             
-            if sign_match:
-                print(f"[+] Extracted Sign Token: {sign_match.group(1)}")
+            if match_yundata:
+                print("[+] Target 'yunData' object mil gaya!")
+                raw_json = match_yundata.group(1)
+                try:
+                    data = json.loads(raw_json)
+                    print("\n[!] File Details Found:")
+                    print(json.dumps(data, indent=4))
+                except json.JSONDecodeError:
+                    print("[-] yunData JSON format me decode nahi ho paya.")
             else:
-                print("[-] Sign token HTML me direct nahi mila (Ho sakta hai JS render ho raha ho).")
-                
-            # Response me file name ya keywords check karna
-            if "filename" in html_content or "file_name" in html_content:
-                print("[+] File metadata is page ke andar maujud hai!")
-            else:
-                print("[-] Page standard login/captcha wall ho sakta hai.")
+                print("[-] HTML me 'yunData' nahi mila. Ho sakta hai page structure badal gaya ho.")
                 
         else:
             print(f"[-] Request failed with status code: {response.status_code}")
