@@ -50,20 +50,19 @@ def get_terabox_link(terabox_url):
             html_content = response.text
             print("[+] Success! HTML data mil gaya.")
             
-            # TeraBox ke page me 'yunData' variable ko dhoondhna
-            match_yundata = re.search(r'yunData\s*=\s*(\{.*?\});', html_content, re.DOTALL)
+            # Saare script tags nikal kar check karna ki file data kahan hai
+            scripts = re.findall(r'<script[^>]*>(.*?)</script>', html_content, re.DOTALL)
+            print(f"[*] Total {len(scripts)} script tags mile hain. Scan ho raha hai...")
             
-            if match_yundata:
-                print("[+] Target 'yunData' object mil gaya!")
-                raw_json = match_yundata.group(1)
-                try:
-                    data = json.loads(raw_json)
-                    print("\n[!] File Details Found:")
-                    print(json.dumps(data, indent=4))
-                except json.JSONDecodeError:
-                    print("[-] yunData JSON format me decode nahi ho paya.")
-            else:
-                print("[-] HTML me 'yunData' nahi mila. Ho sakta hai page structure badal gaya ho.")
+            found = False
+            for i, script in enumerate(scripts):
+                if any(keyword in script for keyword in ['file_name', 'fs_id', 'shareid', 'dlink', 'sign']):
+                    print(f"\n[+] Match mil gaya! Script Tag #{i} me data hai:")
+                    print(script[:400] + "..." if len(script) > 400 else script)
+                    found = True
+                    
+            if not found:
+                print("[-] Kisi bhi script tag me direct file keywords nahi mile. Ho sakta hai ye page redirection ya API based ho.")
                 
         else:
             print(f"[-] Request failed with status code: {response.status_code}")
